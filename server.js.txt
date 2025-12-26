@@ -1,0 +1,128 @@
+require('dotenv').config();
+const express = require('express');
+const { ethers } = require('ethers');
+const cors = require('cors');
+const axios = require('axios');
+
+const app = express();
+app.use(express.json());
+app.use(cors());
+
+// ================= DATOS DE TU PROYECTO =================
+const CONTRACT_ADDRESS = "0x4A5340cBB1e2D000357880fFBaC8AA5B6Cf557fD"; 
+const SHEET_ID = "15Xg4nlQIK6FCFrCAli8qgKvWtwtDzXjBmVFHwYgF2TI"; // Tu hoja de cálculo
+const PROVIDER_URL = "https://polygon-rpc.com";
+const PRIVATE_KEY = process.env.ADMIN_PRIVATE_KEY; 
+// ========================================================
+
+// Diccionario de nombres para LinkedIn
+const BADGE_INFO = {
+    1: "Certificación Especialista SST - Nivel I",
+    2: "Diplomado en Normativa LOPCYMAT",
+    3: "Miembro Verificado DAO Network"
+};
+
+const CONTRACT_ABI = ["function mintInsignia(address to, uint256 id, uint256 amount) public"];
+const provider = new ethers.JsonRpcProvider(PROVIDER_URL);
+
+let wallet;
+let contract;
+
+// Configuración de la Wallet Admin
+if (PRIVATE_KEY) {
+    wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+    contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, wallet);
+    console.log(`🤖 Bot SST DAO Iniciado. Wallet Admin: ${wallet.address}`);
+} else {
+    console.log("⚠️ ADVERTENCIA: No has configurado la ADMIN_PRIVATE_KEY en las variables de entorno.");
+}
+
+// === FUNCIÓN INTELIGENTE: Leer Google Sheets en Vivo ===
+async function buscarWalletEnSheet(emailBuscado) {
+    try {
+        // Descargamos la hoja como CSV (texto)
+        const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv`;
+        const response = await axios.get(url);
+        const filas = response.data.split('\n');
+
+        const emailLimpio = emailBuscado.trim().toLowerCase();
+
+        // Recorremos fila por fila (saltando la cabecera)
+        for (let i = 1; i < filas.length; i++) {
+            // Separamos por comas, pero cuidando las comillas
+            const columnas = filas[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/);
+            
+            // En tu Excel: Columna B (1) es Correo, Columna C (2) es Wallet
+            if (columnas.length >= 3) {
+                let emailHoja = columnas[1]?.replace(/"/g, '').trim().toLowerCase();
+                let walletHoja = columnas[2]?.replace(/"/g, '').trim();
+
+                // Si encontramos coincidencia
+                if (emailHoja === emailLimpio) {
+                    // Validamos que parezca una wallet real
+                    if (walletHoja.startsWith('0x') && walletHoja.length === 42) {
+                        return walletHoja;
+                    }
+                }
+            }
+        }
+        return null; // No encontrado
+
+    } catch (error) {
+        console.error("Error conectando con Google Sheets:", error.message);
+        return null;
+    }
+}
+
+app.get('/', (req, res) => {
+    res.send("✅ Servidor SST DAO Activo y escuchando.");
+});
+
+app.post('/api/emitir-insignia', async (req, res) => {
+    try {
+        const { email, badgeId } = req.body;
+        
+        // Validaciones iniciales
+        if (!email || !badgeId) return res.status(400).json({ error: "Faltan datos (email o badgeId)." });
+        if (!wallet) return res.status(500).json({ error: "Error interno: Falta configurar la clave privada del servidor." });
+
+        console.log(`🔎 Buscando en Google Sheets: ${email}...`);
+
+        // 1. BUSCAR EN GOOGLE SHEETS EN TIEMPO REAL
+        const walletDestino = await buscarWalletEnSheet(email);
+
+        if (!walletDestino) {
+            return res.status(404).json({ error: "No encontramos este correo en tu registro. Asegúrate de haber llenado el formulario de Google." });
+        }
+
+        console.log(`✅ Encontrado. Enviando insignia ${badgeId} a ${walletDestino}`);
+
+        // 2. EMITIR EN BLOCKCHAIN
+        const tx = await contract.mintInsignia(walletDestino, badgeId, 1);
+        console.log(`🚀 Transacción enviada: ${tx.hash}`);
+        
+        // Esperamos confirmación (aprox 2-5 segundos en Polygon)
+        await tx.wait();
+
+        // 3. GENERAR ENLACES DE ÉXITO
+        const openSeaUrl = `https://opensea.io/assets/matic/${CONTRACT_ADDRESS}/${badgeId}`;
+        const nombreCurso = BADGE_INFO[badgeId] || "Certificación SST DAO";
+        const linkedinUrl = `https://www.linkedin.com/profile/add?startTask=CERTIFICATION_NAME&name=${encodeURIComponent(nombreCurso)}&organizationName=La%20Movida%20de%20SST%20DAO&issueYear=${new Date().getFullYear()}&certUrl=${encodeURIComponent(openSeaUrl)}&certId=${tx.hash}`;
+
+        res.json({
+            success: true,
+            wallet: walletDestino,
+            txHash: tx.hash,
+            explorer: `https://polygonscan.com/tx/${tx.hash}`,
+            opensea: openSeaUrl,
+            linkedin: linkedinUrl
+        });
+
+    } catch (error) {
+        console.error("❌ Error en el proceso:", error);
+        res.status(500).json({ error: "Ocurrió un error al procesar la insignia. Intenta de nuevo en unos segundos." });
+    }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🚀 Servidor listo en puerto ${PORT}`));

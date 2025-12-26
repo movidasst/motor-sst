@@ -11,18 +11,22 @@ app.use(cors());
 // ================= DATOS DE TU PROYECTO =================
 const CONTRACT_ADDRESS = "0x4A5340cBB1e2D000357880fFBaC8AA5B6Cf557fD"; 
 const SHEET_ID = "15Xg4nlQIK6FCFrCAli8qgKvWtwtDzXjBmVFHwYgF2TI"; 
+
+// ⚡ MEJORA CRÍTICA: Usamos un nodo más rápido para que no se quede "pensando"
 const PROVIDER_URL = "https://polygon-bor.publicnode.com"; 
 const PRIVATE_KEY = process.env.ADMIN_PRIVATE_KEY; 
 
+// IDs de las pestañas (GIDs)
 const GID_INSIGNIAS = "1450605916"; 
 const GID_USUARIOS = "351737717";   
 // ========================================================
 
-// AGREGAMOS 'balanceOf' PARA PODER CONSULTAR SI YA LA TIENEN
+// ✅ ABI COMPLETO: Incluye 'balanceOf' para verificar si ya la tiene
 const CONTRACT_ABI = [
     "function mintInsignia(address to, uint256 id, uint256 amount) public",
     "function balanceOf(address account, uint256 id) public view returns (uint256)"
 ];
+
 const provider = new ethers.JsonRpcProvider(PROVIDER_URL);
 
 let wallet;
@@ -31,11 +35,12 @@ let contract;
 if (PRIVATE_KEY) {
     wallet = new ethers.Wallet(PRIVATE_KEY, provider);
     contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, wallet);
-    console.log(`🤖 Bot SST Activo. Wallet: ${wallet.address}`);
+    console.log(`🤖 Bot SST Activo y Rápido. Wallet: ${wallet.address}`);
 } else {
-    console.log("⚠️ ERROR: Falta ADMIN_PRIVATE_KEY.");
+    console.log("⚠️ ERROR: Falta ADMIN_PRIVATE_KEY en Render.");
 }
 
+// === CACHÉ DE INSIGNIAS ===
 let insigniasCache = {};
 let lastUpdate = 0;
 
@@ -67,11 +72,12 @@ async function actualizarInsigniasDesdeSheet() {
     } catch (error) { return insigniasCache; }
 }
 
-// === RUTA 1: CONSULTAR Y VERIFICAR SI YA LA TIENE ===
+// === RUTA 1: CONSULTAR USUARIO (CON TU LÓGICA DE FILTROS) ===
 app.post('/api/consultar-usuario', async (req, res) => {
     const { email } = req.body;
     if (!email) return res.status(400).json({ error: "Falta email" });
 
+    // Usamos el GID correcto para encontrar al usuario
     const urlUsers = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${GID_USUARIOS}`; 
     try {
         const resp = await axios.get(urlUsers);
@@ -83,10 +89,14 @@ app.post('/api/consultar-usuario', async (req, res) => {
 
         for (let i = 1; i < filas.length; i++) {
             const cols = filas[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/);
+            
+            // TU ESTRUCTURA: Col B (Email), Col C (Wallet), Col G (IDs)
             if (cols.length >= 3) {
                 const mailHoja = cols[1]?.replace(/"/g, '').trim().toLowerCase();
+                
                 if (mailHoja === emailBuscado) {
                     walletFound = cols[2]?.replace(/"/g, '').trim();
+                    // Leemos Columna G (índice 6) para los permisos
                     if (cols.length > 6) {
                         idsPermitidosString = cols[6]?.replace(/"/g, '').trim(); 
                     }
@@ -95,29 +105,25 @@ app.post('/api/consultar-usuario', async (req, res) => {
             }
         }
 
-        if (!walletFound) return res.status(404).json({ error: "Usuario no encontrado." });
+        if (!walletFound) return res.status(404).json({ error: "Usuario no encontrado en la hoja de respuestas." });
 
         const catalogoCompleto = await actualizarInsigniasDesdeSheet();
         const insigniasDelUsuario = {};
 
+        // Filtramos: Solo agregamos las que están en la columna G
         if (idsPermitidosString) {
             const listaIDs = idsPermitidosString.split(',').map(id => id.trim());
             
-            // VERIFICAMOS EN BLOCKCHAIN SI YA LAS TIENE (En paralelo)
+            // Verificamos propiedad en Blockchain para pintar el botón azul
             await Promise.all(listaIDs.map(async (id) => {
                 if (catalogoCompleto[id]) {
-                    // Copiamos datos básicos
                     insigniasDelUsuario[id] = { ...catalogoCompleto[id] };
-                    insigniasDelUsuario[id].owned = false; // Por defecto no la tiene
+                    insigniasDelUsuario[id].owned = false; 
 
-                    // Consultamos a la Blockchain
                     if (contract) {
                         try {
                             const balance = await contract.balanceOf(walletFound, id);
-                            // Si balance > 0, ya es dueño
-                            if (balance > 0n) {
-                                insigniasDelUsuario[id].owned = true;
-                            }
+                            if (balance > 0n) insigniasDelUsuario[id].owned = true;
                         } catch (err) {
                             console.error(`Error verificando balance ID ${id}:`, err.message);
                         }
@@ -127,18 +133,18 @@ app.post('/api/consultar-usuario', async (req, res) => {
         }
 
         if (Object.keys(insigniasDelUsuario).length === 0) {
-            return res.status(404).json({ error: "Usuario encontrado, pero no tiene insignias asignadas." });
+            return res.status(404).json({ error: "Usuario encontrado, pero no tiene insignias asignadas en la Columna G." });
         }
 
         res.json({ success: true, wallet: walletFound, badges: insigniasDelUsuario });
 
     } catch (e) {
         console.error(e);
-        res.status(500).json({ error: "Error de servidor." });
+        res.status(500).json({ error: "Error de servidor al leer Excel." });
     }
 });
 
-// === RUTA 2: EMITIR (PROTEGIDA CONTRA DUPLICADOS) ===
+// === RUTA 2: EMITIR (PROTEGIDA) ===
 app.post('/api/emitir-insignia', async (req, res) => {
     const { wallet: userWallet, badgeId } = req.body;
     if (!userWallet || !badgeId) return res.status(400).json({ error: "Datos incompletos" });
@@ -150,14 +156,12 @@ app.post('/api/emitir-insignia', async (req, res) => {
         const badgeData = insignias[badgeId];
         if (!badgeData) return res.status(404).json({ error: "Insignia no existente" });
 
-        // 1. VERIFICACIÓN FINAL: ¿Ya la tiene?
+        // Verificamos si ya la tiene
         const balance = await contract.balanceOf(userWallet, badgeId);
-        
-        let txHash = "YA_EXISTE"; // Marcador por defecto
+        let txHash = "YA_EXISTE"; 
 
         if (balance > 0n) {
-            console.log(`El usuario ${userWallet} ya tiene la insignia ${badgeId}. No se emite de nuevo.`);
-            // No lanzamos error, simplemente devolvemos éxito pero sin mintear
+            console.log(`El usuario ${userWallet} ya tiene la insignia ${badgeId}.`);
         } else {
             console.log(`🚀 Emitiendo ID ${badgeId} a ${userWallet}...`);
             const tx = await contract.mintInsignia(userWallet, badgeId, 1);
@@ -176,7 +180,7 @@ app.post('/api/emitir-insignia', async (req, res) => {
             opensea: openSeaUrl,
             linkedin: linkedinUrl,
             image: badgeData.image,
-            alreadyOwned: (balance > 0n) // Le avisamos al frontend si ya la tenía
+            alreadyOwned: (balance > 0n)
         });
 
     } catch (error) {
@@ -197,4 +201,4 @@ app.get('/api/metadata/:id.json', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Servidor Anti-Duplicados listo en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Servidor Rápido listo en puerto ${PORT}`));

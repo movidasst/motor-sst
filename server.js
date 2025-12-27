@@ -9,48 +9,55 @@ app.use(express.json());
 app.use(cors());
 
 // ================= DATOS DE TU PROYECTO =================
-const CONTRACT_ADDRESS = "0x4A5340cBB1e2D000357880fFBaC8AA5B6Cf557fD"; 
+// ✅ NUEVA DIRECCIÓN DEL CONTRATO (SSTBadge_v2)
+const CONTRACT_ADDRESS = "0xE0E07Bbdc1fEeFf774b5F40E856cE2A218501167"; 
+
 const SHEET_ID = "15Xg4nlQIK6FCFrCAli8qgKvWtwtDzXjBmVFHwYgF2TI"; 
-
-// ✅ CORRECCIÓN CRÍTICA: Usamos el RPC oficial público (evita error de Ankr)
-const PROVIDER_URL = "https://polygon-rpc.com"; 
-const PRIVATE_KEY = process.env.ADMIN_PRIVATE_KEY; 
-
-// IDs de las pestañas (GIDs) correctos
+// GIDs (IDs de las pestañas del Excel)
 const GID_INSIGNIAS = "1450605916"; 
 const GID_USUARIOS = "351737717";   
-// ========================================================
 
-// ✅ ABI LIMPIO: Solo una definición para evitar "Ambiguous function description"
+// Usamos ANKR (Estable y Rápido)
+const PROVIDER_URL = "https://rpc.ankr.com/polygon"; 
+const PRIVATE_KEY = process.env.ADMIN_PRIVATE_KEY; 
+// ======================================================
+
+// ABI LIMPIO Y CORRECTO
 const CONTRACT_ABI = [
     "function mintInsignia(address to, uint256 id, uint256 amount) public",
     "function balanceOf(address account, uint256 id) public view returns (uint256)"
 ];
 
-const provider = new ethers.JsonRpcProvider(PROVIDER_URL);
+// Validación de Entorno
+if (!PRIVATE_KEY) {
+    console.error("🚨 ERROR CRÍTICO: Falta ADMIN_PRIVATE_KEY. El servidor no podrá firmar.");
+}
 
-let wallet;
-let contract;
+const provider = new ethers.JsonRpcProvider(PROVIDER_URL);
+let wallet, contract;
 
 if (PRIVATE_KEY) {
     wallet = new ethers.Wallet(PRIVATE_KEY, provider);
     contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, wallet);
-    console.log(`🤖 Bot SST Activo. Wallet: ${wallet.address}`);
-} else {
-    console.log("⚠️ ERROR: Falta ADMIN_PRIVATE_KEY en Render.");
+    console.log(`🛡️ SISTEMA ONLINE. Wallet Admin: ${wallet.address}`);
+    console.log(`📝 Contrato: ${CONTRACT_ADDRESS}`);
 }
 
-// === CACHÉ DE INSIGNIAS ===
+// === CACHÉ RESILIENTE ===
 let insigniasCache = {};
 let lastUpdate = 0;
 
 async function actualizarInsigniasDesdeSheet() {
-    // Si la caché es reciente (menos de 2 min), la usamos
-    if (Date.now() - lastUpdate < 120000 && Object.keys(insigniasCache).length > 0) return insigniasCache;
+    // Si la caché es fresca (menos de 2 min), úsala.
+    if (Date.now() - lastUpdate < 120000 && Object.keys(insigniasCache).length > 0) {
+        return insigniasCache;
+    }
+    
     try {
-        console.log("🔄 Leyendo insignias...");
+        console.log("📥 Sincronizando con Google Sheets...");
         const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${GID_INSIGNIAS}`;
-        const response = await axios.get(url, { timeout: 5000 });
+        const response = await axios.get(url, { timeout: 5000 }); // Timeout de 5s
+        
         const filas = response.data.split('\n');
         const nuevasInsignias = {};
 
@@ -58,10 +65,10 @@ async function actualizarInsigniasDesdeSheet() {
             // Regex para separar CSV respetando comillas
             const cols = filas[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/);
             if (cols.length >= 4) {
-                const id = cols[0]?.replace(/"/g, '').trim();
-                // Validamos que sea un ID numérico
-                if(id && !isNaN(id)) {
-                    nuevasInsignias[id] = {
+                const idRaw = cols[0]?.replace(/"/g, '').trim();
+                // Validar que sea un número real
+                if (idRaw && /^\d+$/.test(idRaw)) {
+                    nuevasInsignias[idRaw] = {
                         name: cols[1]?.replace(/"/g, '').trim(),
                         description: cols[2]?.replace(/"/g, '').trim(),
                         image: cols[3]?.replace(/"/g, '').trim()
@@ -73,160 +80,175 @@ async function actualizarInsigniasDesdeSheet() {
         if (Object.keys(nuevasInsignias).length > 0) {
             insigniasCache = nuevasInsignias;
             lastUpdate = Date.now();
+            console.log(`✅ Caché actualizada: ${Object.keys(insigniasCache).length} items.`);
         }
         return insigniasCache;
+
     } catch (error) { 
-        console.error("Error leyendo insignias:", error.message);
+        console.error("⚠️ Falló actualización de Sheet. Usando caché anterior.", error.message);
         return insigniasCache; 
     }
 }
 
-// RUTA PRINCIPAL
-app.get('/', (req, res) => {
-    res.send("✅ Servidor SST DAO Funcionando Correctamente.");
-});
+// === RUTA BASE ===
+app.get('/', (req, res) => res.send("✅ Servidor SST DAO Activo (Contrato v2)."));
 
-// === RUTA 1: CONSULTAR USUARIO (OPTIMIZADA) ===
+// === RUTA 1: CONSULTAR USUARIO ===
 app.post('/api/consultar-usuario', async (req, res) => {
     const { email } = req.body;
-    if (!email) return res.status(400).json({ error: "Falta email" });
+    if (!email || !email.includes('@')) return res.status(400).json({ error: "Email inválido" });
 
-    const urlUsers = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${GID_USUARIOS}`; 
     try {
+        const urlUsers = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${GID_USUARIOS}`; 
         const resp = await axios.get(urlUsers, { timeout: 5000 });
         const filas = resp.data.split('\n');
         
         let walletFound = null;
-        let idsPermitidosString = ""; 
+        let idsPermitidos = [];
         const emailBuscado = email.trim().toLowerCase();
 
         for (let i = 1; i < filas.length; i++) {
             const cols = filas[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/);
-            
-            // TU ESTRUCTURA: Col B (Email), Col C (Wallet), Col G (IDs)
             if (cols.length >= 3) {
                 const mailHoja = cols[1]?.replace(/"/g, '').trim().toLowerCase();
+                
                 if (mailHoja === emailBuscado) {
-                    walletFound = cols[2]?.replace(/"/g, '').trim();
-                    if (cols.length > 6) {
-                        idsPermitidosString = cols[6]?.replace(/"/g, '').trim(); 
+                    const rawWallet = cols[2]?.replace(/"/g, '').trim();
+                    
+                    if (ethers.isAddress(rawWallet)) {
+                        walletFound = rawWallet;
+                        
+                        if (cols.length > 6) {
+                            const rawIds = cols[6]?.replace(/"/g, '').trim();
+                            if (rawIds) {
+                                // Filtramos solo números válidos
+                                idsPermitidos = rawIds.split(',').map(id => id.trim()).filter(id => /^\d+$/.test(id));
+                            }
+                        }
                     }
                     break;
                 }
             }
         }
 
-        if (!walletFound) return res.status(404).json({ error: "Usuario no encontrado en la hoja de respuestas." });
+        if (!walletFound) return res.status(404).json({ error: "Usuario no encontrado o Wallet inválida en el Excel." });
 
         const catalogo = await actualizarInsigniasDesdeSheet();
         const insigniasUsuario = {};
 
-        // Filtramos y verificamos propiedad en paralelo
-        if (idsPermitidosString) {
-            const listaIDs = idsPermitidosString.split(',').map(id => id.trim());
-            
-            await Promise.all(listaIDs.map(async (id) => {
+        // Verificamos estado en Blockchain
+        if (idsPermitidos.length > 0) {
+            await Promise.all(idsPermitidos.map(async (id) => {
                 if (catalogo[id]) {
-                    insigniasUsuario[id] = { ...catalogo[id], owned: false }; 
-
-                    if (contract) {
-                        try {
-                            const idBN = BigInt(id); // Conversión segura
-                            // Timeout de 2s para lectura de balance
-                            const balancePromise = contract.balanceOf(walletFound, idBN);
-                            const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000));
-                            
-                            const balance = await Promise.race([balancePromise, timeoutPromise]);
+                    insigniasUsuario[id] = { ...catalogo[id], owned: false };
+                    try {
+                        if (contract) {
+                            const idBN = BigInt(id);
+                            const balance = await contract.balanceOf(walletFound, idBN);
                             if (balance > 0n) insigniasUsuario[id].owned = true;
-                        } catch (err) {
-                            // Si falla la lectura, asumimos false y permitimos intentar emitir
-                            console.log(`Salto verificación ID ${id} por lentitud de red.`);
                         }
+                    } catch (err) {
+                        console.warn(`Error leyendo balance ID ${id}: ${err.message}`);
                     }
                 }
             }));
         }
 
         if (Object.keys(insigniasUsuario).length === 0) {
-            return res.status(404).json({ error: "Usuario encontrado, pero no tiene insignias asignadas." });
+            return res.status(404).json({ error: "Usuario encontrado, pero sin insignias asignadas." });
         }
 
         res.json({ success: true, wallet: walletFound, badges: insigniasUsuario });
 
     } catch (e) {
-        console.error(e);
-        res.status(500).json({ error: "Error de servidor al leer Excel." });
+        console.error("Error en consulta:", e);
+        res.status(500).json({ error: "Error interno del servidor." });
     }
 });
 
-// === RUTA 2: EMITIR (PROTEGIDA Y RÁPIDA) ===
+// === RUTA 2: EMITIR (Idempotente y Rápida) ===
 app.post('/api/emitir-insignia', async (req, res) => {
     const { wallet: userWallet, badgeId } = req.body;
-    
-    if (!userWallet || !badgeId) return res.status(400).json({ error: "Datos incompletos" });
-    if (!contract || !wallet) return res.status(500).json({ error: "Error interno: Falta wallet admin." });
+
+    if (!userWallet || !ethers.isAddress(userWallet)) return res.status(400).json({ error: "Wallet inválida." });
+    if (!badgeId) return res.status(400).json({ error: "Falta Badge ID." });
+    if (!contract) return res.status(500).json({ error: "Error interno: Sin wallet admin." });
 
     try {
-        const idBN = BigInt(badgeId); // Conversión segura a BigInt
+        const idBN = BigInt(badgeId); 
         const catalogo = await actualizarInsigniasDesdeSheet();
         const badgeData = catalogo[badgeId];
-        
-        if (!badgeData) return res.status(404).json({ error: "Insignia no existente." });
 
-        // Verificamos si ya la tiene para no gastar gas (Intento rápido)
+        if (!badgeData) return res.status(404).json({ error: "Insignia no existe en el catálogo." });
+
+        console.log(`🤖 Procesando: ID ${idBN} -> ${userWallet}`);
+
+        // IDEMPOTENCIA
         let balance = 0n;
         try {
             balance = await contract.balanceOf(userWallet, idBN);
-        } catch(e) { console.log("Saltando check balance..."); }
-
-        let txHash = "YA_EXISTE"; 
-
+        } catch(err) {
+            console.log("⚠️ No se pudo leer balance, procediendo a emitir por si acaso.");
+        }
+        
         if (balance > 0n) {
-            console.log(`El usuario ${userWallet} ya tiene la insignia ${badgeId}.`);
-        } else {
-            console.log(`🚀 Emitiendo ID ${badgeId} a ${userWallet}...`);
-            
-            // MODO TURBO: "Fire and Forget" con Gas Limit manual
-            const tx = await contract.mintInsignia(userWallet, idBN, 1, { 
-                gasLimit: 500000 
+            console.log(`ℹ️ Omitiendo mint: Ya la tiene.`);
+            return res.json({
+                success: true,
+                alreadyOwned: true,
+                opensea: `https://opensea.io/assets/matic/${CONTRACT_ADDRESS}/${badgeId}`,
+                linkedin: null
             });
-            
-            console.log(`✅ Tx Enviada: ${tx.hash}`);
-            txHash = tx.hash;
-            // NO esperamos await tx.wait() para responder instantáneo
         }
 
+        // EJECUCIÓN (Modo Turbo - Fire & Forget)
+        const tx = await contract.mintInsignia(userWallet, idBN, 1, { gasLimit: 500000 });
+        console.log(`✅ Tx Enviada: ${tx.hash}`);
+
         const openSeaUrl = `https://opensea.io/assets/matic/${CONTRACT_ADDRESS}/${badgeId}`;
-        const linkedinUrl = `https://www.linkedin.com/profile/add?startTask=CERTIFICATION_NAME&name=${encodeURIComponent(badgeData.name)}&organizationName=La%20Movida%20de%20SST%20DAO&issueYear=${new Date().getFullYear()}&certUrl=${encodeURIComponent(openSeaUrl)}&certId=${txHash}`;
+        const linkedinUrl = `https://www.linkedin.com/profile/add?startTask=CERTIFICATION_NAME&name=${encodeURIComponent(badgeData.name)}&organizationName=La%20Movida%20de%20SST%20DAO&issueYear=${new Date().getFullYear()}&certUrl=${encodeURIComponent(openSeaUrl)}&certId=${tx.hash}`;
 
         res.json({
             success: true,
-            txHash: txHash,
+            alreadyOwned: false,
+            txHash: tx.hash,
             opensea: openSeaUrl,
             linkedin: linkedinUrl,
-            image: badgeData.image,
-            alreadyOwned: (balance > 0n)
+            image: badgeData.image
         });
 
     } catch (error) {
-        console.error("❌ Error Blockchain:", error);
-        let msg = "Error desconocido.";
+        console.error("❌ Error Crítico:", error);
         
+        let msg = "Error desconocido.";
         if (error.code === 'INSUFFICIENT_FUNDS') msg = "La DAO no tiene fondos (MATIC).";
         else if (error.message) msg = error.message;
         
-        res.status(500).json({ error: "Fallo Blockchain: " + msg });
+        res.status(500).json({ error: msg });
     }
 });
 
-// Metadata
+// Metadata endpoint (OpenSea llama a esto)
 app.get('/api/metadata/:id.json', async (req, res) => {
-    const id = req.params.id;
+    let id = req.params.id;
+    
+    // Traductor Hexadecimal para OpenSea
+    if (id.length > 10) {
+        try { id = BigInt(id).toString(); } catch(e) {}
+    }
+
     const catalogo = await actualizarInsigniasDesdeSheet();
     const badge = catalogo[id];
-    if (!badge) return res.status(404).json({ error: "No encontrada" });
-    res.json({ name: badge.name, description: badge.description, image: badge.image });
+    
+    if (!badge) return res.status(404).json({ error: "Not found" });
+    
+    res.json({ 
+        name: badge.name, 
+        description: badge.description, 
+        image: badge.image,
+        external_url: "https://motor-sst.onrender.com"
+    });
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Servidor Rápido listo en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Servidor listo en ${PORT}`));

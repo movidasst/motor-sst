@@ -12,16 +12,16 @@ app.use(cors());
 const CONTRACT_ADDRESS = "0x4A5340cBB1e2D000357880fFBaC8AA5B6Cf557fD"; 
 const SHEET_ID = "15Xg4nlQIK6FCFrCAli8qgKvWtwtDzXjBmVFHwYgF2TI"; 
 
-// ⚡ MEJORA CRÍTICA: Usamos un nodo más rápido para que no se quede "pensando"
+// ⚡ PROVEEDOR RÁPIDO: Usamos un nodo público veloz para evitar timeouts
 const PROVIDER_URL = "https://polygon-bor.publicnode.com"; 
 const PRIVATE_KEY = process.env.ADMIN_PRIVATE_KEY; 
 
-// IDs de las pestañas (GIDs)
+// IDs de las pestañas (GIDs) correctos
 const GID_INSIGNIAS = "1450605916"; 
 const GID_USUARIOS = "351737717";   
 // ========================================================
 
-// ✅ ABI COMPLETO: Incluye 'balanceOf' para verificar si ya la tiene
+// ✅ ABI COMPLETO: Incluye 'balanceOf' para verificar propiedad
 const CONTRACT_ABI = [
     "function mintInsignia(address to, uint256 id, uint256 amount) public",
     "function balanceOf(address account, uint256 id) public view returns (uint256)"
@@ -45,6 +45,7 @@ let insigniasCache = {};
 let lastUpdate = 0;
 
 async function actualizarInsigniasDesdeSheet() {
+    // Si la caché es reciente (menos de 1 minuto), la usamos
     if (Date.now() - lastUpdate < 60000 && Object.keys(insigniasCache).length > 0) return insigniasCache;
     try {
         console.log("🔄 Leyendo insignias...");
@@ -57,6 +58,7 @@ async function actualizarInsigniasDesdeSheet() {
             const cols = filas[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/);
             if (cols.length >= 4) {
                 const id = cols[0]?.replace(/"/g, '').trim();
+                // Validamos que sea un ID numérico
                 if(id && !isNaN(id)) {
                     nuevasInsignias[id] = {
                         name: cols[1]?.replace(/"/g, '').trim(),
@@ -72,12 +74,16 @@ async function actualizarInsigniasDesdeSheet() {
     } catch (error) { return insigniasCache; }
 }
 
-// === RUTA 1: CONSULTAR USUARIO (CON TU LÓGICA DE FILTROS) ===
+// === RUTA PRINCIPAL (Para verificar estado) ===
+app.get('/', (req, res) => {
+    res.send("✅ Servidor SST DAO Funcionando Correctamente.");
+});
+
+// === RUTA 1: CONSULTAR USUARIO (CON LÓGICA DE FILTROS) ===
 app.post('/api/consultar-usuario', async (req, res) => {
     const { email } = req.body;
     if (!email) return res.status(400).json({ error: "Falta email" });
 
-    // Usamos el GID correcto para encontrar al usuario
     const urlUsers = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${GID_USUARIOS}`; 
     try {
         const resp = await axios.get(urlUsers);
@@ -114,7 +120,7 @@ app.post('/api/consultar-usuario', async (req, res) => {
         if (idsPermitidosString) {
             const listaIDs = idsPermitidosString.split(',').map(id => id.trim());
             
-            // Verificamos propiedad en Blockchain para pintar el botón azul
+            // Verificamos propiedad en Blockchain para pintar el botón azul si ya la tiene
             await Promise.all(listaIDs.map(async (id) => {
                 if (catalogoCompleto[id]) {
                     insigniasDelUsuario[id] = { ...catalogoCompleto[id] };
@@ -156,7 +162,7 @@ app.post('/api/emitir-insignia', async (req, res) => {
         const badgeData = insignias[badgeId];
         if (!badgeData) return res.status(404).json({ error: "Insignia no existente" });
 
-        // Verificamos si ya la tiene
+        // Verificamos si ya la tiene para no gastar gas
         const balance = await contract.balanceOf(userWallet, badgeId);
         let txHash = "YA_EXISTE"; 
 
@@ -166,7 +172,7 @@ app.post('/api/emitir-insignia', async (req, res) => {
             console.log(`🚀 Emitiendo ID ${badgeId} a ${userWallet}...`);
             const tx = await contract.mintInsignia(userWallet, badgeId, 1);
             console.log(`Tx enviada: ${tx.hash}`);
-            await tx.wait();
+            await tx.wait(); // Esperamos confirmación
             txHash = tx.hash;
             console.log(`✅ Confirmada.`);
         }

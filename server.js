@@ -8,43 +8,44 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-// ================= DATOS =================
+// ================= DATOS DE TU PROYECTO =================
 const CONTRACT_ADDRESS = "0x4A5340cBB1e2D000357880fFBaC8AA5B6Cf557fD"; 
 const SHEET_ID = "15Xg4nlQIK6FCFrCAli8qgKvWtwtDzXjBmVFHwYgF2TI"; 
 
-// 🔥 CAMBIO CRÍTICO: Usamos ANKR. Es el RPC más rápido y estable.
+// ANKR: El proveedor más rápido y estable para evitar bloqueos
 const PROVIDER_URL = "https://rpc.ankr.com/polygon"; 
 const PRIVATE_KEY = process.env.ADMIN_PRIVATE_KEY; 
 
 const GID_INSIGNIAS = "1450605916"; 
 const GID_USUARIOS = "351737717";   
-// =========================================
+// ========================================================
 
 const CONTRACT_ABI = [
     "function mintInsignia(address to, uint256 id, uint256 amount) public",
     "function balanceOf(address account, uint256 id) public view returns (uint256)"
 ];
 
-// Configuración Ethers v6
 const provider = new ethers.JsonRpcProvider(PROVIDER_URL);
-let wallet, contract;
+
+let wallet;
+let contract;
 
 if (PRIVATE_KEY) {
     wallet = new ethers.Wallet(PRIVATE_KEY, provider);
     contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, wallet);
-    console.log(`✅ BOT ACTIVO (ANKR). Wallet: ${wallet.address}`);
+    console.log(`✅ BOT ACTIVO (MODO TURBO). Wallet: ${wallet.address}`);
 } else {
-    console.error("❌ ERROR: Falta ADMIN_PRIVATE_KEY.");
+    console.error("❌ ERROR FATAL: No se encontró ADMIN_PRIVATE_KEY.");
 }
 
-// === CACHÉ GOOGLE SHEETS ===
+// === CACHÉ ===
 let insigniasCache = {};
 let lastUpdate = 0;
 
 async function actualizarInsigniasDesdeSheet() {
     if (Date.now() - lastUpdate < 60000 && Object.keys(insigniasCache).length > 0) return insigniasCache;
     try {
-        console.log("📥 Leyendo Google Sheets...");
+        console.log("📥 Leyendo insignias...");
         const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${GID_INSIGNIAS}`;
         const response = await axios.get(url);
         const filas = response.data.split('\n');
@@ -69,15 +70,14 @@ async function actualizarInsigniasDesdeSheet() {
     } catch (error) { return insigniasCache; }
 }
 
-// === RUTA PRINCIPAL ===
-app.get('/', (req, res) => res.send("✅ Servidor SST Online (ANKR)."));
+// RUTA PRINCIPAL
+app.get('/', (req, res) => res.send("✅ Servidor SST Online (Modo Turbo)."));
 
 // === RUTA 1: CONSULTAR (RÁPIDA) ===
 app.post('/api/consultar-usuario', async (req, res) => {
     const { email } = req.body;
     if (!email) return res.status(400).json({ error: "Falta email" });
 
-    // 1. Buscamos en Google Sheets
     const urlUsers = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${GID_USUARIOS}`; 
     try {
         const resp = await axios.get(urlUsers);
@@ -100,15 +100,12 @@ app.post('/api/consultar-usuario', async (req, res) => {
 
         if (!walletFound) return res.status(404).json({ error: "Usuario no encontrado." });
 
-        // 2. Traemos catálogo
         const catalogo = await actualizarInsigniasDesdeSheet();
         const insigniasUsuario = {};
 
-        // 3. Verificamos Blockchain en Paralelo (Para pintar botón azul/verde)
         if (idsPermitidosString) {
             const listaIDs = idsPermitidosString.split(',').map(id => id.trim());
-            
-            // Usamos Promise.all para preguntar por todas a la vez
+            // Verificamos propiedad sin bloquear (Promise.all)
             await Promise.all(listaIDs.map(async (id) => {
                 if (catalogo[id]) {
                     insigniasUsuario[id] = { ...catalogo[id] };
@@ -117,7 +114,7 @@ app.post('/api/consultar-usuario', async (req, res) => {
                         try {
                             const balance = await contract.balanceOf(walletFound, id);
                             if (balance > 0n) insigniasUsuario[id].owned = true;
-                        } catch (err) { console.error(`Error leyendo balance ${id}:`, err.message); }
+                        } catch (err) { console.error(`Error balance ID ${id}:`, err.message); }
                     }
                 }
             }));
@@ -129,43 +126,40 @@ app.post('/api/consultar-usuario', async (req, res) => {
 
     } catch (e) {
         console.error(e);
-        res.status(500).json({ error: "Error leyendo Excel." });
+        res.status(500).json({ error: "Error interno servidor." });
     }
 });
 
-// === RUTA 2: EMITIR (MODO TURBO - DISPARAR Y OLVIDAR) ===
+// === RUTA 2: EMITIR (INSTANTÁNEA) ===
 app.post('/api/emitir-insignia', async (req, res) => {
     const { wallet: userWallet, badgeId } = req.body;
     
     if (!userWallet || !badgeId) return res.status(400).json({ error: "Datos incompletos" });
-    if (!contract) return res.status(500).json({ error: "Error interno: Sin contrato." });
+    if (!contract || !wallet) return res.status(500).json({ error: "Error interno: Sin wallet admin." });
 
     try {
-        console.log(`🚀 Iniciando emisión ID ${badgeId} para ${userWallet}...`);
-        
-        const catalogo = await actualizarInsigniasDesdeSheet();
-        const badgeData = catalogo[badgeId];
-        if (!badgeData) return res.status(404).json({ error: "ID de insignia no existe" });
+        const insignias = await actualizarInsigniasDesdeSheet();
+        const badgeData = insignias[badgeId];
+        if (!badgeData) return res.status(404).json({ error: "Insignia no existe" });
 
-        // 1. Verificación rápida de propiedad
+        // 1. Verificamos si ya la tiene
         const balance = await contract.balanceOf(userWallet, badgeId);
-        
         let txHash = "YA_EXISTE";
 
         if (balance > 0n) {
-            console.log(`ℹ️ Usuario ya tiene la insignia.`);
+            console.log(`Usuario ya tiene ID ${badgeId}.`);
         } else {
-            // 2. EMISIÓN FUERZA BRUTA
-            // Gas Limit alto (500k) para que no calcule nada y entre directo
-            // SIN 'await tx.wait()' para responder en 0.5 segundos
+            console.log(`🚀 Enviando Tx para ID ${badgeId}...`);
+            
+            // 2. 🔥 MODO TURBO: Enviamos la transacción SIN esperar confirmación (await tx.wait())
+            // Y forzamos el gas para evitar cálculos lentos
             const tx = await contract.mintInsignia(userWallet, badgeId, 1, {
                 gasLimit: 500000 
             });
             txHash = tx.hash;
-            console.log(`✅ Tx enviada a la mempool: ${txHash}`);
+            console.log(`✅ Tx Enviada a la red (sin esperar minado): ${txHash}`);
         }
 
-        // 3. Respuesta Inmediata
         const openSeaUrl = `https://opensea.io/assets/matic/${CONTRACT_ADDRESS}/${badgeId}`;
         const linkedinUrl = `https://www.linkedin.com/profile/add?startTask=CERTIFICATION_NAME&name=${encodeURIComponent(badgeData.name)}&organizationName=La%20Movida%20de%20SST%20DAO&issueYear=${new Date().getFullYear()}&certUrl=${encodeURIComponent(openSeaUrl)}&certId=${txHash}`;
 
@@ -180,15 +174,18 @@ app.post('/api/emitir-insignia', async (req, res) => {
 
     } catch (error) {
         console.error("❌ Error Blockchain:", error);
+        // Si falta gas, avisamos claro
+        if (error.code === 'INSUFFICIENT_FUNDS' || error.message.includes('funds')) {
+            return res.status(500).json({ error: "Error Crítico: La DAO se quedó sin Gas (MATIC)." });
+        }
         res.status(500).json({ error: "Fallo Blockchain: " + (error.shortMessage || error.message) });
     }
 });
 
-// Metadata para OpenSea
 app.get('/api/metadata/:id.json', async (req, res) => {
     const id = req.params.id;
-    const catalogo = await actualizarInsigniasDesdeSheet();
-    const badge = catalogo[id];
+    const insignias = await actualizarInsigniasDesdeSheet();
+    const badge = insignias[id];
     if (!badge) return res.status(404).json({ error: "No encontrada" });
     res.json({ name: badge.name, description: badge.description, image: badge.image });
 });

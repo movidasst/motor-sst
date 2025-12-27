@@ -13,14 +13,13 @@ const CONTRACT_ADDRESS = "0xE0E07Bbdc1fEeFf774b5F40E856cE2A218501167";
 const SHEET_ID = "15Xg4nlQIK6FCFrCAli8qgKvWtwtDzXjBmVFHwYgF2TI"; 
 const GID_INSIGNIAS = "1450605916"; 
 const GID_USUARIOS = "351737717";   
+const COMPANY_ID = "80061757"; // ID oficial de La Movida de SST en LinkedIn
 
 const PROVIDER_URL = "https://polygon-rpc.com"; 
 const PRIVATE_KEY = process.env.ADMIN_PRIVATE_KEY; 
 // ======================================================
 
-// 1️⃣ ABI ESTRICTO: Definimos solo lo necesario y usamos nombres claros
 const CONTRACT_ABI = [
-    // Firma explícita de 3 argumentos (la que usa tu contrato actual)
     "function mintInsignia(address to, uint256 id, uint256 amount) public",
     "function balanceOf(address account, uint256 id) public view returns (uint256)"
 ];
@@ -43,7 +42,7 @@ let lastUpdate = 0;
 async function actualizarInsigniasDesdeSheet() {
     if (Date.now() - lastUpdate < 120000 && Object.keys(insigniasCache).length > 0) return insigniasCache;
     try {
-        console.log("📥 Sincronizando Google Sheets...");
+        console.log("📥 Sincronizando datos de insignias desde Google Sheets...");
         const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${GID_INSIGNIAS}`;
         const response = await axios.get(url, { timeout: 8000 });
         
@@ -51,13 +50,12 @@ async function actualizarInsigniasDesdeSheet() {
         const nuevasInsignias = {};
 
         for (let i = 1; i < filas.length; i++) {
-            // Parser CSV manual robusto para este caso simple
             const cols = filas[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/);
             if (cols.length >= 4) {
                 const idRaw = cols[0]?.replace(/"/g, '').trim();
-                // 7️⃣ Validación estricta de ID
                 if (idRaw && /^\d+$/.test(idRaw)) {
                     nuevasInsignias[idRaw] = {
+                        id: idRaw,
                         name: cols[1]?.replace(/"/g, '').trim(),
                         description: cols[2]?.replace(/"/g, '').trim(),
                         image: cols[3]?.replace(/"/g, '').trim()
@@ -77,7 +75,22 @@ async function actualizarInsigniasDesdeSheet() {
     }
 }
 
-app.get('/', (req, res) => res.send("✅ Servidor SST DAO Activo (v7.0 Enterprise)."));
+// Helper para construir el enlace a LinkedIn oficial (Add Certification)
+function buildLinkedInLink(name, badgeId, certUrl, txHash = null) {
+    const certId = txHash || `${CONTRACT_ADDRESS}-${badgeId}`;
+    const baseUrl = "https://www.linkedin.com/profile/add?startTask=CERTIFICATION_NAME";
+    const params = [
+        `name=${encodeURIComponent(name)}`,
+        `organizationId=${COMPANY_ID}`,
+        `certId=${encodeURIComponent(certId)}`,
+        `certUrl=${encodeURIComponent(certUrl)}`,
+        `issueYear=${new Date().getFullYear()}`,
+        `issueMonth=${new Date().getMonth() + 1}`
+    ];
+    return `${baseUrl}&${params.join('&')}`;
+}
+
+app.get('/', (req, res) => res.send("✅ Servidor SST DAO Activo (v7.1 Dynamic Metadata)."));
 
 // === RUTA 1: CONSULTAR USUARIO ===
 app.post('/api/consultar-usuario', async (req, res) => {
@@ -99,7 +112,6 @@ app.post('/api/consultar-usuario', async (req, res) => {
                 const mailHoja = cols[1]?.replace(/"/g, '').trim().toLowerCase();
                 if (mailHoja === emailBuscado) {
                     const rawWallet = cols[2]?.replace(/"/g, '').trim();
-                    // 5️⃣ Validación estricta de Wallet
                     if (ethers.isAddress(rawWallet)) {
                         walletFound = rawWallet;
                         if (cols.length > 6) {
@@ -117,20 +129,21 @@ app.post('/api/consultar-usuario', async (req, res) => {
         const catalogo = await actualizarInsigniasDesdeSheet();
         const insigniasUsuario = {};
 
-        // 5️⃣ SOLUCIÓN RATE LIMIT: Loop secuencial en vez de Promise.all masivo
-        // Esto protege al RPC público de bloqueos
         if (idsPermitidos.length > 0) {
             for (const id of idsPermitidos) {
                 if (catalogo[id]) {
                     insigniasUsuario[id] = { ...catalogo[id], owned: false };
+                    
+                    // Añadir el link de LinkedIn dinámico a la respuesta
+                    const osUrl = `https://opensea.io/assets/polygon/${CONTRACT_ADDRESS}/${id}`;
+                    insigniasUsuario[id].linkedin = buildLinkedInLink(catalogo[id].name, id, osUrl);
+
                     if (contract) {
                         try {
-                            const idBN = BigInt(id);
-                            // Llamada segura
-                            const balance = await contract.balanceOf(walletFound, idBN);
+                            const balance = await contract.balanceOf(walletFound, id);
                             if (balance > 0n) insigniasUsuario[id].owned = true;
                         } catch (err) {
-                            console.warn(`Skipping balance check for ID ${id} due to RPC error.`);
+                            console.warn(`Error de balance para ID ${id}`);
                         }
                     }
                 }
@@ -147,11 +160,10 @@ app.post('/api/consultar-usuario', async (req, res) => {
     }
 });
 
-// === RUTA 2: EMITIR (BLINDADA) ===
+// === RUTA 2: EMITIR ===
 app.post('/api/emitir-insignia', async (req, res) => {
     const { wallet: userWallet, badgeId } = req.body;
 
-    // 5️⃣ Validaciones Previas
     if (!userWallet || !ethers.isAddress(userWallet)) return res.status(400).json({ error: "Wallet inválida." });
     if (!badgeId) return res.status(400).json({ error: "Falta ID." });
 
@@ -162,56 +174,27 @@ app.post('/api/emitir-insignia', async (req, res) => {
 
         if (!badgeData) return res.status(404).json({ error: "Insignia no existe." });
 
-        console.log(`🤖 Iniciando proceso ID ${idBN} -> ${userWallet}`);
-
-        // Verificación de balance (Idempotencia)
         let balance = 0n;
-        try {
-            balance = await contract.balanceOf(userWallet, idBN);
-        } catch(e) { console.log("Balance check skipped..."); }
+        try { balance = await contract.balanceOf(userWallet, idBN); } catch(e) {}
 
         if (balance > 0n) {
-            console.log("ℹ️ Ya posee la insignia.");
-            // 2️⃣ URL OPENSEA CORRECTA (Polygon)
             const osUrl = `https://opensea.io/assets/polygon/${CONTRACT_ADDRESS}/${badgeId}`;
-            return res.json({ success: true, alreadyOwned: true, opensea: osUrl });
+            return res.json({ 
+                success: true, 
+                alreadyOwned: true, 
+                opensea: osUrl,
+                linkedin: buildLinkedInLink(badgeData.name, badgeId, osUrl)
+            });
         }
 
-        // 6️⃣ GAS DINÁMICO (Adiós ruleta rusa)
-        let gasLimit;
-        let tx;
+        const estimate = await contract.getFunction("mintInsignia(address,uint256,uint256)").estimateGas(userWallet, idBN, 1);
+        const gasLimit = (estimate * 120n) / 100n;
         
-        try {
-            // Intentamos estimar el gas real. Si el contrato va a fallar, esto lanza error aquí.
-            // 1️⃣ LLAMADA EXPLÍCITA POR FIRMA para evitar ambigüedad
-            const estimate = await contract.getFunction("mintInsignia(address,uint256,uint256)").estimateGas(userWallet, idBN, 1);
-            // Agregamos 20% de colchón
-            gasLimit = (estimate * 120n) / 100n;
-            
-            console.log(`⛽ Gas estimado: ${estimate.toString()} (+20% buffer)`);
-            
-            // Ejecución
-            tx = await contract.getFunction("mintInsignia(address,uint256,uint256)")(
-                userWallet, 
-                idBN, 
-                1, 
-                { gasLimit }
-            );
-            
-        } catch (err) {
-            console.error("❌ Falló estimación/emisión:", err.message);
-            // Si es un error de reversión del contrato, lo mostramos
-            if (err.code === 'CALL_EXCEPTION') {
-                return res.status(400).json({ error: "El contrato rechazó la operación (posiblemente ID inválido o permisos)." });
-            }
-            throw err; // Relanzamos otros errores
-        }
-
-        console.log(`✅ Tx Hash: ${tx.hash}`);
-
-        // 2️⃣ URLs ACTUALIZADAS
+        const tx = await contract.getFunction("mintInsignia(address,uint256,uint256)")(userWallet, idBN, 1, { gasLimit });
+        
         const openSeaUrl = `https://opensea.io/assets/polygon/${CONTRACT_ADDRESS}/${badgeId}`;
-        const linkedinUrl = `https://www.linkedin.com/profile/add?startTask=CERTIFICATION_NAME&name=${encodeURIComponent(badgeData.name)}&organizationName=La%20Movida%20de%20SST%20DAO&issueYear=${new Date().getFullYear()}&certUrl=${encodeURIComponent(openSeaUrl)}&certId=${tx.hash}`;
+        // En la pantalla de éxito, el ID de la credencial es el Tx Hash
+        const linkedinUrl = buildLinkedInLink(badgeData.name, badgeId, openSeaUrl, tx.hash);
 
         res.json({
             success: true,
@@ -223,35 +206,46 @@ app.post('/api/emitir-insignia', async (req, res) => {
         });
 
     } catch (error) {
-        console.error("❌ Error Crítico:", error);
-        let msg = "Error desconocido.";
-        if (error.code === 'INSUFFICIENT_FUNDS') msg = "Falta MATIC en la DAO.";
-        else if (error.message) msg = error.message;
-        
-        res.status(500).json({ error: "Blockchain Error: " + msg });
+        console.error("❌ Error emisión:", error);
+        res.status(500).json({ error: "Blockchain Error: " + (error.message || "Error desconocido") });
     }
 });
 
-// 8️⃣ Metadata Cache Headers
+// === RUTA 3: METADATOS PARA OPENSEA (Dinamismo total desde Sheet) ===
 app.get('/api/metadata/:id.json', async (req, res) => {
     let id = req.params.id;
-    if (id.length > 10) { try { id = BigInt(id).toString(); } catch(e) {} }
+    // Si OpenSea manda el ID en hexadecimal, lo convertimos a string numérico
+    if (id.startsWith('0x')) { try { id = BigInt(id).toString(); } catch(e) {} }
 
     const catalogo = await actualizarInsigniasDesdeSheet();
     const badge = catalogo[id];
     
-    if (!badge) return res.status(404).json({ error: "Not found" });
+    if (!badge) return res.status(404).json({ error: "Insignia no encontrada en el catálogo." });
     
-    // Header para que OpenSea cachee esto y no tumbe tu servidor
-    res.setHeader('Cache-Control', 'public, max-age=86400'); // Cache de 24h
+    res.setHeader('Cache-Control', 'public, max-age=3600'); // Cache de 1 hora para rapidez
     
+    // Devolvemos el JSON estándar de OpenSea enriquecido
     res.json({
         name: badge.name, 
         description: badge.description, 
         image: badge.image,
-        external_url: "https://movidasst.com" // O tu URL principal
+        external_url: "https://dao.movidasst.com",
+        attributes: [
+            {
+                "trait_type": "Emisor",
+                "value": "La Movida de SST DAO"
+            },
+            {
+                "trait_type": "ID de Credencial",
+                "value": `${CONTRACT_ADDRESS}-${id}`
+            },
+            {
+                "trait_type": "Red",
+                "value": "Polygon"
+            }
+        ]
     });
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Servidor Enterprise listo en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Servidor listo en puerto ${PORT}`));
